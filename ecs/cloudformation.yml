@@ -1,0 +1,677 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  ContainerCpu:
+    Type: Number
+    Default: 512
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 1024
+    Description: How much memory in megabytes to give the container
+
+  ClusterName:
+    Type: String
+    Default: 'selenium-grid'
+    Description: Name of the ECS Cluster
+
+  VPC:
+    Type: String
+    Description: VPC-Id
+
+  PrivateSubnetOne:
+    Type: String
+    Description: Subnet-Id 1 from VPC (Default use1-private-a)
+
+  PrivateSubnetTwo:
+    Type: String
+    Description: Subnet-Id 2 from VPC (Default use1-private-b)
+
+  UiGitHash:
+    Type: String
+    Description: Git revision of UI project
+
+  SeleniumGitHash:
+    Type: String
+    Description: Git revision of Selenium project
+
+  SeleniumBuildNumber:
+    Type: String
+    Description: Build number of UI project
+
+  S3ResultsBucket:
+    Type: String
+    Description: S3 Bucket to upload result test html/xml to
+
+
+  ECRUrl:
+    Type: String
+    Description: Address to the ECR on your aws account.
+      E.g. <account-id>.dkr.ecr.<region>.amazonaws.com = 123456789.dkr.ecr.eu-west-1.amazonaws.com
+
+  ECRTag:
+    Type: String
+    Description: Tag of ECR images (e.g. latest, prod, dev)
+
+Resources:
+  ECSCluster:
+    DependsOn: ECSPytestTaskRole
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref 'ClusterName'
+  FargateContainerSecurityGroup:
+    DependsOn: ECSPytestTaskRole
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the Fargate containers
+      VpcId: !Ref 'VPC'
+  EcsSecurityGroupIngressFromPublicALB:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: FargateContainerSecurityGroup
+    Properties:
+      Description: Ingress from the public ALB
+      GroupId: !Ref 'FargateContainerSecurityGroup'
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref 'InternalLoadBalancerSG'
+  EcsSecurityGroupIngressFromSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    DependsOn: FargateContainerSecurityGroup
+    Properties:
+      Description: Ingress from other containers in the same security group
+      GroupId: !Ref 'FargateContainerSecurityGroup'
+      IpProtocol: -1
+      SourceSecurityGroupId: !Ref 'FargateContainerSecurityGroup'
+  InternalLoadBalancerSG:
+    DependsOn: ECSPytestTaskRole
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId: !Ref 'VPC'
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+  InternalLoadBalancer:
+    DependsOn: ECSPytestTaskRole
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '180'
+      Subnets:
+        - !Ref PrivateSubnetOne
+        - !Ref PrivateSubnetTwo
+      SecurityGroups: [!Ref 'InternalLoadBalancerSG']
+      Tags:
+        - Key: 'stack-id'
+          Value: !Ref 'AWS::StackId'
+
+  PublicLoadBalancerListener4444:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: InternalLoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'TargetGroup4444'
+          Type: 'forward'
+      LoadBalancerArn: !Ref 'InternalLoadBalancer'
+      Port: 4444
+      Protocol: HTTP
+  PublicLoadBalancerListener8080:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: InternalLoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'TargetGroup8080'
+          Type: 'forward'
+      LoadBalancerArn: !Ref 'InternalLoadBalancer'
+      Port: 8080
+      Protocol: HTTP
+  PublicLoadBalancerListener81:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: InternalLoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'TargetGroup81'
+          Type: 'forward'
+      LoadBalancerArn: !Ref 'InternalLoadBalancer'
+      Port: 81
+      Protocol: HTTP
+  ECSRole:
+    DependsOn: ECSPytestTaskRole
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: ecs-service
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ec2:AttachNetworkInterface'
+                  - 'ec2:CreateNetworkInterface'
+                  - 'ec2:CreateNetworkInterfacePermission'
+                  - 'ec2:DeleteNetworkInterface'
+                  - 'ec2:DeleteNetworkInterfacePermission'
+                  - 'ec2:Describe*'
+                  - 'ec2:DetachNetworkInterface'
+                  - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+                  - 'elasticloadbalancing:DeregisterTargets'
+                  - 'elasticloadbalancing:Describe*'
+                  - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+                  - 'elasticloadbalancing:RegisterTargets'
+                Resource: '*'
+  ECSTaskExecutionRole:
+    DependsOn: ECSPytestTaskRole
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ecr:GetAuthorizationToken'
+                  - 'ecr:BatchCheckLayerAvailability'
+                  - 'ecr:GetDownloadUrlForLayer'
+                  - 'ecr:BatchGetImage'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: '*'
+  ECSPytestTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ecs-tasks.amazonaws.com]
+            Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: ECSTaskS3PutRolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                Resource:
+                  - !Join ['', ['arn:aws:s3:::', !Ref 'S3ResultsBucket' ]]
+                  - !Join ['', ['arn:aws:s3:::', !Ref 'S3ResultsBucket', '/*' ]]
+        - PolicyName: ECSStackDeletionRole
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:DeleteRole'
+                  - 'iam:DeleteRolePolicy'
+                Resource:
+                  - !Join ['', ['arn:aws:iam::', !Ref 'AWS::AccountId' , ':role/', !Ref 'AWS::StackName', '-', 'ECSRole', '-*' ]]
+                  - !Join ['', ['arn:aws:iam::', !Ref 'AWS::AccountId' , ':role/', !Ref 'AWS::StackName', '-', 'ECSTaskExecutionRole', '-*' ]]
+                  - !Join ['', ['arn:aws:iam::', !Ref 'AWS::AccountId' , ':role/', !Ref 'AWS::StackName', '-', 'ECSPytestTaskRole', '-*' ]]
+              - Effect: Allow
+                Action: 'cloudformation:DeleteStack'
+                Resource: !Join ['', ['arn:aws:cloudformation:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':stack/', !Ref 'ClusterName', '/*']]
+              - Effect: Allow
+                Action:
+                  - 'ecs:UpdateService'
+                  - 'ecs:DeleteService'
+                  - 'ecs:DescribeServices'
+                  - 'ecs:DeregisterTaskDefinition'
+                  # TODO AWS currently does not support resource level permissions for ECS services and task definitions: https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-supported-iam-actions-resources.html
+                Resource: '*'
+              - Effect: Allow
+                Action: 'ecs:DeleteCluster'
+                Resource: !Join ['', ['arn:aws:ecs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':cluster/', !Ref 'ClusterName']]
+              - Effect: Allow
+                Action:
+                  - 'ec2:DeleteSecurityGroup'
+                  - 'ec2:RevokeSecurityGroupIngress'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    # Supported resource-level permissions:  https://iam.cloudonaut.io/reference/ec2/RevokeSecurityGroupIngress.html Workaround: use resource tags
+                    'ec2:ResourceTag/aws:cloudformation:stack-id': !Ref 'AWS::StackId' # has resource tag which ties SG to stack
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancingv2:DeleteTargetGroup'
+                  - 'elasticloadbalancing:DeleteTargetGroup'
+                Resource:
+                  - !Join ['', ['arn:aws:elasticloadbalancing:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':targetgroup/', !Ref 'ClusterName', '*']]
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancingv2:DeleteLoadBalancer'
+                  - 'elasticloadbalancing:DeleteLoadBalancer'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'elasticloadbalancing:ResourceTag/aws:cloudformation:stack-id': !Ref 'AWS::StackId'
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancingv2:DeleteLoadBalancer'
+                  - 'elasticloadbalancing:DeleteLoadBalancer'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'elasticloadbalancing:ResourceTag/stack-id': !Ref 'AWS::StackId'
+              - Effect: Allow
+                Action:
+                  - 'elasticloadbalancingv2:DeleteListener'
+                  - 'elasticloadbalancing:DeleteListener'
+                  - 'elasticloadbalancingv2:DeleteRule'
+                  - 'elasticloadbalancing:DeleteRule'
+                Resource: '*' # TODO could listener rules be found without references?
+              - Effect: Allow
+                Action: 'logs:DeleteLogGroup'
+                Resource: !Join ['', ['arn:aws:logs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':log-group:', !Ref 'ClusterName', '*']]
+              - Effect: Allow
+                Action:
+                  - 'route53:ListHostedZones'
+                  - 'route53:GetChange'
+                Resource: '*' # public hosted zone needs all access: https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/r53-api-permissions-ref.html
+              - Effect: Allow
+                Action:
+                  - 'route53:ChangeResourceRecordSets'
+                Resource: !Join ['', ['arn:aws:route53:::hostedzone/', 'ZE4WNYGTUWAX4']]
+
+  LogGroup:
+    DependsOn: ECSPytestTaskRole
+    Type: 'AWS::Logs::LogGroup'
+    DeletionPolicy: 'Retain'
+    Properties:
+      LogGroupName: !Join ['_', [!Ref 'ClusterName', !Ref 'SeleniumBuildNumber', !Ref 'AWS::StackName']]
+      RetentionInDays: 30
+
+  TaskDefinitionWiremock:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt 'ECSTaskExecutionRole.Arn'
+      ContainerDefinitions:
+        - Name: 'wiremock'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Join ['', [!Ref 'ECRUrl', '/wiremock:', !Ref 'ECRTag']]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'selenium'
+          PortMappings:
+            - ContainerPort: 8080
+  TaskDefinitionUi:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt 'ECSTaskExecutionRole.Arn'
+      ContainerDefinitions:
+        - Name: 'ui'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Join ['', [!Ref 'ECRUrl', '/ui:', !Ref 'ECRTag']]
+          Environment:
+            - Name: 'BACKEND_URL'
+              Value: !Join ['', ['http://', !GetAtt 'InternalLoadBalancer.DNSName', ':8080']]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'selenium'
+          PortMappings:
+            - ContainerPort: 81
+            - ContainerPort: 9180
+
+  TaskDefinitionSeleniumPytest:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      #      Cpu: !Ref 'ContainerCpu'
+      #      Memory: !Ref 'ContainerMemory'
+      Cpu: 2048
+      Memory: 8192
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt 'ECSTaskExecutionRole.Arn'
+      TaskRoleArn: !GetAtt 'ECSPytestTaskRole.Arn'
+      ContainerDefinitions:
+        - Name: 'selenium-pytest'
+          #        Cpu: !Ref 'ContainerCpu'
+          #        Memory: !Ref 'ContainerMemory'
+          Cpu: 2048
+          Memory: 8192
+          Image: !Join ['', [!Ref 'ECRUrl', '/selenium-pytest:', !Ref 'ECRTag']]
+          Environment:
+            - Name: 'HUB_ADDRESS'
+              Value: !GetAtt 'InternalLoadBalancer.DNSName'
+            - Name: 'HUB_PORT'
+              Value: '4444'
+            - Name: 'FRONTEND_URL'
+              Value: !Join ['', ['http://', !GetAtt 'InternalLoadBalancer.DNSName', ':81']]
+            - Name: 'UI_GIT_HASH'
+              Value: !Ref 'UiGitHash'
+            - Name: 'SELENIUM_GIT_HASH'
+              Value: !Ref 'SeleniumGitHash'
+            - Name: 'SELENIUM_BUILD_NUMBER'
+              Value: !Ref 'SeleniumBuildNumber'
+            - Name: 'CLUSTER_NAME'
+              Value: !Ref 'ClusterName'
+            - Name: 'S3_RESULTS_BUCKET'
+              Value: !Ref 'S3ResultsBucket'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'selenium'
+          PortMappings:
+            - ContainerPort: 4321
+
+  TaskDefinitionHub:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt 'ECSTaskExecutionRole.Arn'
+      ContainerDefinitions:
+        - Name: 'hub'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: 'selenium/hub:3.9.1-actinium'
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'selenium'
+          PortMappings:
+            - ContainerPort: 4444
+          Environment:
+            - Name: GRID_MAX_SESSION
+              Value: 50
+  TaskDefinitionNodeChrome:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt 'ECSTaskExecutionRole.Arn'
+      ContainerDefinitions:
+        - Name: 'node-chrome'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+#          Image: !Join ['', [!Ref 'ECRUrl', '/selenium-chrome:', !Ref 'ECRTag']]
+          Image: 'selenium/node-chrome:3.141.59'
+          Environment:
+            - Name: 'HUB_PORT_4444_TCP_ADDR'
+              Value: !GetAtt 'InternalLoadBalancer.DNSName'
+            - Name: 'HUB_PORT_4444_TCP_PORT'
+              Value: '4444'
+          EntryPoint: ['sh', '-c']
+          Command: ["PRIVATE=$(curl -s http://169.254.170.2/v2/metadata | jq -r '.Containers[1].Networks[0].IPv4Addresses[0]');
+                    export REMOTE_HOST=\"http://$PRIVATE:5555\";
+                    echo \"Set Remote Host Address to: $PRIVATE\";
+                    /opt/bin/entry_point.sh;"]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'selenium'
+          PortMappings:
+            - ContainerPort: 5555
+  TaskDefinitionNodeFirefox:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt 'ECSTaskExecutionRole.Arn'
+      ContainerDefinitions:
+        - Name: 'node-firefox'
+          Cpu: !Ref 'ContainerCpu'
+          Memory: !Ref 'ContainerMemory'
+          Image: !Join ['', [!Ref 'ECRUrl', '/selenium-firefox:', !Ref 'ECRTag']]
+          Environment:
+            - Name: 'HUB_PORT_4444_TCP_ADDR'
+              Value: !GetAtt 'InternalLoadBalancer.DNSName'
+            - Name: 'HUB_PORT_4444_TCP_PORT'
+              Value: '4444'
+          EntryPoint: ['sh', '-c']
+          Command: ["PRIVATE=$(curl -s http://169.254.170.2/v2/metadata | jq -r '.Containers[1].Networks[0].IPv4Addresses[0]');
+                               export REMOTE_HOST=\"http://$PRIVATE:5555\";
+                               echo \"Set Remote Host Address to: $PRIVATE\";
+                               /opt/bin/entry_point.sh;"]
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: 'selenium'
+          PortMappings:
+            - ContainerPort: 5555
+  ServiceHub:
+    Type: AWS::ECS::Service
+    DependsOn: LoadBalancerRule4444
+    Properties:
+      ServiceName: 'hub'
+      Cluster: !Ref 'ECSCluster'
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref 'FargateContainerSecurityGroup'
+          Subnets:
+            - !Ref 'PrivateSubnetOne'
+            - !Ref 'PrivateSubnetTwo'
+      TaskDefinition: !Ref 'TaskDefinitionHub'
+      LoadBalancers:
+        - ContainerName: 'hub'
+          ContainerPort: 4444
+          TargetGroupArn: !Ref 'TargetGroup4444'
+  ServiceNodeChrome:
+    Type: AWS::ECS::Service
+    DependsOn: ServiceHub
+    Properties:
+      ServiceName: 'node-chrome'
+      Cluster: !Ref 'ECSCluster'
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: 6
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref 'FargateContainerSecurityGroup'
+          Subnets:
+            - !Ref 'PrivateSubnetOne'
+            - !Ref 'PrivateSubnetTwo'
+      TaskDefinition: !Ref 'TaskDefinitionNodeChrome'
+  ServiceWiremock:
+    Type: AWS::ECS::Service
+    DependsOn: [ServiceHub, LoadBalancerRule8080]
+    Properties:
+      ServiceName: 'wiremock'
+      Cluster: !Ref 'ECSCluster'
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref 'FargateContainerSecurityGroup'
+          Subnets:
+            - !Ref 'PrivateSubnetOne'
+            - !Ref 'PrivateSubnetTwo'
+      TaskDefinition: !Ref 'TaskDefinitionWiremock'
+      LoadBalancers:
+        - ContainerName: 'wiremock'
+          ContainerPort: 8080
+          TargetGroupArn: !Ref 'TargetGroup8080'
+  ServiceUi:
+    Type: AWS::ECS::Service
+    DependsOn: [ServiceHub, LoadBalancerRule81]
+    Properties:
+      ServiceName: 'ui'
+      Cluster: !Ref 'ECSCluster'
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref 'FargateContainerSecurityGroup'
+          Subnets:
+            - !Ref 'PrivateSubnetOne'
+            - !Ref 'PrivateSubnetTwo'
+      TaskDefinition: !Ref 'TaskDefinitionUi'
+      LoadBalancers:
+        - ContainerName: 'ui'
+          ContainerPort: 81
+          TargetGroupArn: !Ref 'TargetGroup81'
+  ServiceSeleniumPytest:
+    Type: AWS::ECS::Service
+    DependsOn: [ServiceHub, ServiceWiremock, ServiceUi]
+    Properties:
+      ServiceName: 'selenium-pytest'
+      Cluster: !Ref 'ECSCluster'
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 75
+      DesiredCount: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          SecurityGroups:
+            - !Ref 'FargateContainerSecurityGroup'
+          Subnets:
+            - !Ref 'PrivateSubnetOne'
+            - !Ref 'PrivateSubnetTwo'
+      TaskDefinition: !Ref 'TaskDefinitionSeleniumPytest'
+  TargetGroup4444:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Join ['', [!Ref 'ClusterName', 4444]]
+      Port: 4444
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref 'VPC'
+  TargetGroup8080:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Join ['', [!Ref 'ClusterName', 8080]]
+      Port: 8080
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref 'VPC'
+  TargetGroup81:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetType: ip
+      Name: !Join ['', [!Ref 'ClusterName', 81]]
+      Port: 81
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref 'VPC'
+  LoadBalancerRule4444:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: PublicLoadBalancerListener4444
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'TargetGroup4444'
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: ['*']
+      ListenerArn: !Ref 'PublicLoadBalancerListener4444'
+      Priority: 1
+  LoadBalancerRule8080:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: PublicLoadBalancerListener8080
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'TargetGroup8080'
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: ['*']
+      ListenerArn: !Ref 'PublicLoadBalancerListener8080'
+      Priority: 2
+  LoadBalancerRule81:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: PublicLoadBalancerListener81
+    Properties:
+      Actions:
+        - TargetGroupArn: !Ref 'TargetGroup81'
+          Type: 'forward'
+      Conditions:
+        - Field: path-pattern
+          Values: ['*']
+      ListenerArn: !Ref 'PublicLoadBalancerListener81'
+      Priority: 3
+
+Outputs:
+  ExternalUrl:
+    Description: The url of the external load balancer
+    Value: !Join ['', ['http://', !GetAtt 'InternalLoadBalancer.DNSName']]
+    Export:
+      Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ExternalUrl' ] ]

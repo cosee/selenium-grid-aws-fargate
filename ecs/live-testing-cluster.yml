@@ -1,0 +1,66 @@
+---
+version: '3'
+
+services:
+  pytest:
+    depends_on:
+    - ui
+    - wiremock
+    image: selenium-pytest:latest
+    environment:
+      - FRONTEND_URL=http://ui:81
+      - HUB_ADDRESS=hub
+      - HUB_PORT=4444
+      - PYTEST_EXPRESSION=${PYTEST_EXPRESSION}
+    networks:
+    - selenium-network
+#    command: "-c 'chmod +x /scripts/entrypoint.sh; chmod +x /scripts/wait-for-it.sh; /scripts/entrypoint.sh'"
+
+  ui:
+    depends_on:
+    - hub
+    - node
+    image: ui:latest
+    environment:
+    - BACKEND_URL=http://wiremock:8080
+    expose:
+      - 81
+    ports:
+      - 3000:81
+    networks:
+    - selenium-network
+
+  wiremock:
+    image: wiremock:latest
+    command: --verbose --local-response-templating
+    expose:
+        - "8080"
+    networks:
+        selenium-network:
+          aliases:
+            - mockserver
+
+  hub:
+    image: selenium/hub:3.9.1-actinium
+    expose:
+    - 4444
+    networks:
+    - selenium-network
+
+  node:
+    depends_on:
+    - hub
+    image: selenium/node-chrome:3.9.1-actinium
+    expose:
+    - 5555
+    environment:
+    - HUB_PORT_4444_TCP_ADDR=hub
+    - HUB_PORT_4444_TCP_PORT=4444
+    networks:
+    - selenium-network
+    logging:
+      driver: "none"
+
+networks:
+    selenium-network:
+      driver: bridge

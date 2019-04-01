@@ -1,0 +1,72 @@
+---
+version: '3'
+
+services:
+  pytest:
+    depends_on:
+    - ui
+    - wiremock
+    image: selenium-pytest
+    environment:
+      - FRONTEND_URL=http://ui:81
+      - HUB_ADDRESS=hub
+      - HUB_PORT=4444
+    networks:
+    - selenium-network
+    logging:
+      driver: "none"
+
+  ui:
+    depends_on:
+    - hub
+    - node
+    image: ui
+    environment:
+    - BACKEND_URL=http://wiremock:8080
+    - LOCAL_CONTENT_URL=http://wiremock:8080
+    expose:
+      - 81
+    ports:
+      - 81:81
+    networks:
+    - selenium-network
+    logging:
+      driver: "none"
+
+  wiremock:
+    image: wiremock
+    expose:
+      - 8080
+    networks:
+    - selenium-network
+    logging:
+      driver: "none"
+
+  hub:
+    image: selenium/hub:3.9.1-actinium
+    expose:
+    - 4444
+    ports:
+    - 4444:4444
+    networks:
+    - selenium-network
+
+  node:
+    depends_on:
+    - hub
+    image: selenium/node-chrome:3.9.1-actinium
+    expose:
+    - 5555
+    environment:
+    - HUB_PORT_4444_TCP_ADDR=hub
+    - HUB_PORT_4444_TCP_PORT=4444
+#    extra_hosts:
+#      - "ecs:wiremock"
+    networks:
+    - selenium-network
+    logging:
+      driver: "none"
+
+networks:
+    selenium-network:
+      driver: bridge
