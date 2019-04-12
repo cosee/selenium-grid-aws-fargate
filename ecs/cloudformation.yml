@@ -43,7 +43,6 @@ Parameters:
     Type: String
     Description: S3 Bucket to upload result test html/xml to
 
-
   ECRUrl:
     Type: String
     Description: Address to the ECR on your aws account.
@@ -126,15 +125,15 @@ Resources:
       LoadBalancerArn: !Ref 'InternalLoadBalancer'
       Port: 8080
       Protocol: HTTP
-  PublicLoadBalancerListener81:
+  PublicLoadBalancerListener80:
     Type: AWS::ElasticLoadBalancingV2::Listener
     DependsOn: InternalLoadBalancer
     Properties:
       DefaultActions:
-        - TargetGroupArn: !Ref 'TargetGroup81'
+        - TargetGroupArn: !Ref 'TargetGroup80'
           Type: 'forward'
       LoadBalancerArn: !Ref 'InternalLoadBalancer'
-      Port: 81
+      Port: 80
       Protocol: HTTP
   ECSRole:
     DependsOn: ECSPytestTaskRole
@@ -276,15 +275,6 @@ Resources:
               - Effect: Allow
                 Action: 'logs:DeleteLogGroup'
                 Resource: !Join ['', ['arn:aws:logs:', !Ref 'AWS::Region', ':', !Ref 'AWS::AccountId', ':log-group:', !Ref 'ClusterName', '*']]
-              - Effect: Allow
-                Action:
-                  - 'route53:ListHostedZones'
-                  - 'route53:GetChange'
-                Resource: '*' # public hosted zone needs all access: https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/r53-api-permissions-ref.html
-              - Effect: Allow
-                Action:
-                  - 'route53:ChangeResourceRecordSets'
-                Resource: !Join ['', ['arn:aws:route53:::hostedzone/', 'ZE4WNYGTUWAX4']]
 
   LogGroup:
     DependsOn: ECSPytestTaskRole
@@ -340,7 +330,7 @@ Resources:
               awslogs-region: !Ref 'AWS::Region'
               awslogs-stream-prefix: 'selenium'
           PortMappings:
-            - ContainerPort: 81
+            - ContainerPort: 80
             - ContainerPort: 9180
 
   TaskDefinitionSeleniumPytest:
@@ -368,7 +358,7 @@ Resources:
             - Name: 'HUB_PORT'
               Value: '4444'
             - Name: 'FRONTEND_URL'
-              Value: !Join ['', ['http://', !GetAtt 'InternalLoadBalancer.DNSName', ':81']]
+              Value: !Join ['', ['http://', !GetAtt 'InternalLoadBalancer.DNSName', ':80']]
             - Name: 'UI_GIT_HASH'
               Value: !Ref 'UiGitHash'
             - Name: 'SELENIUM_GIT_HASH'
@@ -426,7 +416,6 @@ Resources:
         - Name: 'node-chrome'
           Cpu: !Ref 'ContainerCpu'
           Memory: !Ref 'ContainerMemory'
-#          Image: !Join ['', [!Ref 'ECRUrl', '/selenium-chrome:', !Ref 'ECRTag']]
           Image: 'selenium/node-chrome:3.141.59'
           Environment:
             - Name: 'HUB_PORT_4444_TCP_ADDR'
@@ -548,7 +537,7 @@ Resources:
           TargetGroupArn: !Ref 'TargetGroup8080'
   ServiceUi:
     Type: AWS::ECS::Service
-    DependsOn: [ServiceHub, LoadBalancerRule81]
+    DependsOn: [ServiceHub, LoadBalancerRule80]
     Properties:
       ServiceName: 'ui'
       Cluster: !Ref 'ECSCluster'
@@ -568,8 +557,8 @@ Resources:
       TaskDefinition: !Ref 'TaskDefinitionUi'
       LoadBalancers:
         - ContainerName: 'ui'
-          ContainerPort: 81
-          TargetGroupArn: !Ref 'TargetGroup81'
+          ContainerPort: 80
+          TargetGroupArn: !Ref 'TargetGroup80'
   ServiceSeleniumPytest:
     Type: AWS::ECS::Service
     DependsOn: [ServiceHub, ServiceWiremock, ServiceUi]
@@ -618,7 +607,7 @@ Resources:
       Protocol: HTTP
       UnhealthyThresholdCount: 2
       VpcId: !Ref 'VPC'
-  TargetGroup81:
+  TargetGroup80:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       HealthCheckIntervalSeconds: 6
@@ -627,8 +616,8 @@ Resources:
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
       TargetType: ip
-      Name: !Join ['', [!Ref 'ClusterName', 81]]
-      Port: 81
+      Name: !Join ['', [!Ref 'ClusterName', 80]]
+      Port: 80
       Protocol: HTTP
       UnhealthyThresholdCount: 2
       VpcId: !Ref 'VPC'
@@ -656,17 +645,17 @@ Resources:
           Values: ['*']
       ListenerArn: !Ref 'PublicLoadBalancerListener8080'
       Priority: 2
-  LoadBalancerRule81:
+  LoadBalancerRule80:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    DependsOn: PublicLoadBalancerListener81
+    DependsOn: PublicLoadBalancerListener80
     Properties:
       Actions:
-        - TargetGroupArn: !Ref 'TargetGroup81'
+        - TargetGroupArn: !Ref 'TargetGroup80'
           Type: 'forward'
       Conditions:
         - Field: path-pattern
           Values: ['*']
-      ListenerArn: !Ref 'PublicLoadBalancerListener81'
+      ListenerArn: !Ref 'PublicLoadBalancerListener80'
       Priority: 3
 
 Outputs:
