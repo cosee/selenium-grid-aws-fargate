@@ -30,7 +30,7 @@ git clone -b master --single-branch https://github.com/cosee/realworld-demo-ui-t
 
 ## Ui project
 rm -rf ui
-git clone -b master --single-branch https://github.com/cosee/react-redux-realworld-example-app.git ui-selenium
+git clone -b master --single-branch https://github.com/cosee/react-redux-realworld-example-app.git ui
 
 aws ecr get-login --no-include-email --region $REGION | bash
 
