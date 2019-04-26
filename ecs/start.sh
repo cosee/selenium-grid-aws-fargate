@@ -23,7 +23,6 @@ export SELENIUM_DIR=${SELENIUM_DIR}
 # We clone the projects from a public repo so they can run as an example.
 # If you just want to run your local changes you can skip this and point to your ui and test directory.
 
-# TODO use github links
 ## Ui-test project
 rm -rf ui-selenium
 git clone -b master --single-branch https://github.com/cosee/realworld-demo-ui-test.git ui-selenium
@@ -70,19 +69,19 @@ docker build -t selenium-pytest:latest . --no-cache
 rm -rf repo
 cd ..
 
+DATE=`date +%Y-%m-%d-%H-%M-%S`
+
 aws ecr create-repository --repository-name wiremock
-docker tag wiremock:latest ${ECR_URL}/wiremock:latest
-docker push ${ECR_URL}/wiremock:latest
+docker tag wiremock:latest ${ECR_URL}/wiremock:${DATE}
+docker push ${ECR_URL}/wiremock:${DATE}
 
 aws ecr create-repository --repository-name ui
-docker tag ui:latest ${ECR_URL}/ui:latest
-docker push ${ECR_URL}/ui:latest
+docker tag ui:latest ${ECR_URL}/ui:${DATE}
+docker push ${ECR_URL}/ui:${DATE}
 
 aws ecr create-repository --repository-name selenium-pytest
-docker tag selenium-pytest:latest ${ECR_URL}/selenium-pytest:latest
-docker push ${ECR_URL}/selenium-pytest:latest
-
-DATE=`date +%Y-%m-%d-%H-%M-%S`
+docker tag selenium-pytest:latest ${ECR_URL}/selenium-pytest:${DATE}
+docker push ${ECR_URL}/selenium-pytest:${DATE}
 
 aws cloudformation create-stack --stack-name sg-${DATE} \
 --capabilities CAPABILITY_IAM \
@@ -92,7 +91,7 @@ ParameterKey=UiGitHash,ParameterValue=ui-hash \
 ParameterKey=SeleniumGitHash,ParameterValue=selenium-hash \
 ParameterKey=SeleniumBuildNumber,ParameterValue=selenium-build \
 ParameterKey=S3ResultsBucket,ParameterValue= \
-ParameterKey=ECRTag,ParameterValue=latest \
+ParameterKey=ECRTag,ParameterValue=${DATE} \
 ParameterKey=VPC,ParameterValue=${VPC} \
 ParameterKey=PrivateSubnetOne,ParameterValue=${PRIVATE_SUBNET_ONE} \
 ParameterKey=PrivateSubnetTwo,ParameterValue=${PRIVATE_SUBNET_TWO} \
